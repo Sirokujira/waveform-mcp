@@ -59,6 +59,14 @@ pub struct ListSignalsArgs {
     pub limit: Option<isize>,
 }
 
+impl ListSignalsArgs {
+    /// An explicit `"recursive": null` deserializes to `None` rather than going
+    /// through `default_recursive`, so both spellings resolve here.
+    fn recursive(&self) -> bool {
+        self.recursive.unwrap_or(false)
+    }
+}
+
 fn default_recursive() -> Option<bool> {
     Some(false)
 }
@@ -209,7 +217,7 @@ impl WaveformHandler {
     }
 
     #[tool(
-        description = "List all signals in an open waveform. Use waveform_id from open_waveform. Optional: filter by name_pattern (case-insensitive substring), hierarchy_prefix (e.g., 'top.module'), recursive (default: true), and limit."
+        description = "List all signals in an open waveform. Use waveform_id from open_waveform. Optional: filter by name_pattern (case-insensitive substring), hierarchy_prefix (e.g., 'top.module'), recursive (default: false), and limit."
     )]
     async fn list_signals(
         &self,
@@ -223,13 +231,11 @@ impl WaveformHandler {
         })?;
 
         let hierarchy = waveform.hierarchy();
-        let recursive = args.recursive.unwrap_or(true);
-
         let signals = list_signals(
             hierarchy,
             args.name_pattern.as_deref(),
             args.hierarchy_prefix.as_deref(),
-            recursive,
+            args.recursive(),
             args.limit,
         );
 
@@ -499,4 +505,38 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_signals_recursive_defaults_to_false() {
+        let omitted: ListSignalsArgs =
+            serde_json::from_str(r#"{"waveform_id": "wave"}"#).expect("omitted recursive");
+        let explicit_null: ListSignalsArgs =
+            serde_json::from_str(r#"{"waveform_id": "wave", "recursive": null}"#)
+                .expect("null recursive");
+
+        assert!(
+            !omitted.recursive(),
+            "omitting recursive stays non-recursive"
+        );
+        assert!(
+            !explicit_null.recursive(),
+            "an explicit null must match an omitted field"
+        );
+    }
+
+    #[test]
+    fn list_signals_recursive_honors_explicit_value() {
+        let on: ListSignalsArgs =
+            serde_json::from_str(r#"{"waveform_id": "wave", "recursive": true}"#).unwrap();
+        let off: ListSignalsArgs =
+            serde_json::from_str(r#"{"waveform_id": "wave", "recursive": false}"#).unwrap();
+
+        assert!(on.recursive());
+        assert!(!off.recursive());
+    }
 }
