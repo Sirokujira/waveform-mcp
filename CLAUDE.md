@@ -12,8 +12,10 @@ An MCP (Model Context Protocol) server for reading and analyzing VCD/FST wavefor
 - **formatting.rs**: Time and signal value formatting utilities
 - **hierarchy.rs**: Signal/scope lookup by hierarchical path
 - **signal.rs**: Signal reading, event finding, and metadata
+- **capture.rs**: Logic-analyzer capture as a data model, serialized to VCD
+- **ad3.rs**: WaveForms SDK FFI for live capture (behind the `ad3` feature)
 
-## MCP Tools (8 total)
+## MCP Tools (8 total, plus 2 behind the `ad3` feature)
 
 1. `open_waveform` - Open VCD/FST files, assign optional alias
 2. `close_waveform` - Close waveform and free memory
@@ -23,6 +25,11 @@ An MCP (Model Context Protocol) server for reading and analyzing VCD/FST wavefor
 6. `get_signal_info` - Get signal type, width, index range
 7. `find_signal_events` - Find all changes in time range
 8. `find_conditional_events` - Complex condition search with expression parser
+
+With `--features ad3`:
+
+9. `list_devices` - Enumerate connected Digilent devices
+10. `capture_logic` - Capture from the logic analyzer and open it as a waveform
 
 ## Key Dependencies
 
@@ -78,7 +85,14 @@ waveform-cli open_waveform test.vcd -- read_signal test.vcd top.clk --time-index
 ```bash
 cargo build --release
 cargo test
+
+# Live capture from a Digilent device; needs the WaveForms SDK installed
+cargo build --release --features ad3
 ```
+
+The `ad3` feature links `libdwf`. Capture tools live in their own
+`#[tool_router]` block because the macro registers every `#[tool]` in its block
+regardless of `#[cfg]`.
 
 **Binaries:**
 - `target/release/waveform-mcp` - MCP server (stdio/HTTP modes)

@@ -154,6 +154,23 @@ fn default_find_conditional_events_limit() -> Option<isize> {
     Some(100)
 }
 
+#[cfg(feature = "ad3")]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CaptureLogicArgs {
+    #[serde(default)]
+    pub device_index: Option<i32>,
+    pub sample_rate_hz: f64,
+    pub sample_count: usize,
+    #[serde(default)]
+    pub channel_names: Option<Vec<String>>,
+    #[serde(default)]
+    pub channel_count: Option<usize>,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloseWaveformArgs {
     pub waveform_id: String,
@@ -445,7 +462,128 @@ impl WaveformHandler {
     }
 }
 
-#[tool_handler]
+/// Capture tools live in their own router so the main one still compiles when
+/// the `ad3` feature is off: `#[tool_router]` registers every `#[tool]` in its
+/// block regardless of `#[cfg]`.
+#[cfg(feature = "ad3")]
+#[tool_router(router = ad3_tool_router)]
+impl WaveformHandler {
+    #[tool(
+        description = "List connected Digilent devices (Analog Discovery and similar) available for logic capture. Returns each device's index, name and serial number. The index is what capture_logic takes as device_index."
+    )]
+    async fn list_devices(&self) -> Result<CallToolResult, McpError> {
+        let devices = tokio::task::spawn_blocking(waveform_mcp::ad3::list_devices)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("device enumeration panicked: {e}"), None)
+            })?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        if devices.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                "No Digilent devices found. Check that the device is connected and that no other WaveForms application holds it open.".to_string(),
+            )]));
+        }
+
+        let listing = devices
+            .iter()
+            .map(|d| format!("[{}] {} (SN: {})", d.index, d.name, d.serial))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Found {} device(s):\n{}",
+            devices.len(),
+            listing
+        ))]))
+    }
+
+    #[tool(
+        description = "Capture digital signals from a connected Digilent device's logic analyzer and open the result as a waveform. Give sample_rate_hz and sample_count; name the channels with channel_names, or just set channel_count to get dio0..dioN. The capture is stored under alias (default 'capture') and is then readable with the same tools as a file: list_signals, read_signal, find_signal_events, find_conditional_events. The device divides its internal clock, so the achieved rate may differ from the requested one and is reported back."
+    )]
+    async fn capture_logic(
+        &self,
+        args: Parameters<CaptureLogicArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = &args.0;
+
+        let channel_names = match (&args.channel_names, args.channel_count) {
+            (Some(names), _) => names.clone(),
+            (None, Some(count)) => (0..count).map(|i| format!("dio{i}")).collect(),
+            (None, None) => {
+                return Err(McpError::invalid_params(
+                    "either channel_names or channel_count is required".to_string(),
+                    None,
+                ));
+            }
+        };
+
+        let request = waveform_mcp::ad3::CaptureRequest {
+            device_index: args.device_index.unwrap_or(0),
+            sample_rate_hz: args.sample_rate_hz,
+            sample_count: args.sample_count,
+            channel_names,
+        };
+        let scope = args.scope.clone().unwrap_or_else(|| "dio".to_string());
+        let alias = args.alias.clone().unwrap_or_else(|| "capture".to_string());
+
+        // The SDK blocks while the acquisition fills, so keep it off the runtime.
+        let capture = tokio::task::spawn_blocking(move || {
+            waveform_mcp::ad3::capture_logic(&request, || {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("capture panicked: {e}"), None))?
+        .map_err(|e| McpError::invalid_params(e, None))?;
+
+        // Materialize as VCD so the capture is read back through the same path
+        // as any opened file, and so it survives for later inspection.
+        // The alias reaches us from the caller, so keep it from steering the
+        // write anywhere other than the temp directory.
+        let file_stem: String = alias
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = std::env::temp_dir().join(format!("waveform-mcp-{}.vcd", file_stem));
+        std::fs::write(&path, capture.to_vcd(&scope)).map_err(|e| {
+            McpError::internal_error(format!("could not write {path:?}: {e}"), None)
+        })?;
+        let waveform = wellen::simple::read(&path).map_err(|e| {
+            McpError::internal_error(format!("could not read back capture: {e}"), None)
+        })?;
+
+        let mut waveforms = self.waveforms.write().await;
+        waveforms.insert(alias.clone(), waveform);
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Captured {} samples at {:.6} Hz on {} channel(s), opened as '{}' (saved to {})",
+            capture.samples.len(),
+            capture.sample_rate_hz,
+            capture.channel_names.len(),
+            alias,
+            path.display()
+        ))]))
+    }
+}
+
+impl WaveformHandler {
+    /// The file tools, plus the capture tools when they are compiled in.
+    fn combined_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let router = Self::tool_router();
+        #[cfg(feature = "ad3")]
+        let router = router + Self::ad3_tool_router();
+        router
+    }
+}
+
+#[tool_handler(router = Self::combined_tool_router())]
 impl ServerHandler for WaveformHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
