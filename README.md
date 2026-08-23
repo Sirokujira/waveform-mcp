@@ -60,6 +60,44 @@ When running in HTTP mode, the server listens on the specified bind address (def
 - Format time values with timescale information (e.g., "10ns", "5000ps")
 - Streamable HTTP server support for remote access
 
+## Logic capture from a Digilent device (optional)
+
+Digital signals can be captured straight from a connected Digilent device
+(Analog Discovery 3 and similar) instead of being read from a file. Linking
+requires Digilent's WaveForms SDK, so this is behind the `ad3` feature and is
+off by default:
+
+```bash
+cargo build --release --features ad3
+```
+
+Install [WaveForms](https://digilent.com/reference/software/waveforms/waveforms-3/start)
+first — it provides `libdwf`, which the build links against.
+
+Two extra tools appear when the feature is on:
+
+- **list_devices** - List connected Digilent devices with their index, name and
+  serial number.
+
+- **capture_logic** - Run one buffered logic-analyzer acquisition and open the
+  result as a waveform.
+  - `sample_rate_hz`: Requested sampling rate. The device divides its internal
+    clock, so the achieved rate is reported back and may differ.
+  - `sample_count`: Number of samples to capture (bounded by the device buffer)
+  - `channel_names`: Optional channel names, least significant DIO first
+  - `channel_count`: Optional shorthand that names the channels `dio0`..`dioN`
+  - `alias`: Optional name for the captured waveform (default: `capture`)
+  - `scope`: Optional scope the channels are placed under (default: `dio`)
+
+  **Example response:**
+  ```
+  Captured 64 samples at 25000000.000000 Hz on 4 channel(s), opened as 'cap' (saved to /tmp/waveform-mcp-cap.vcd)
+  ```
+
+The capture is written out as VCD and read back, so it is inspected with the
+same tools as any file - `list_signals`, `read_signal`, `find_signal_events`
+and `find_conditional_events` all work on it.
+
 ## Tools
 
 The server provides 8 MCP tools:
